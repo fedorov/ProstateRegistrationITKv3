@@ -69,6 +69,7 @@
 // Software Guide : BeginCodeSnippet
 #include "itkCenteredTransformInitializer.h"
 #include "itkVersorRigid3DTransform.h"
+#include "itkEuler3DTransform.h"
 #include "itkAffineTransform.h"
 #include "itkBSplineDeformableTransform.h"
 #include "itkRegularStepGradientDescentOptimizer.h"
@@ -88,6 +89,9 @@
 #include "itkTransformFileReader.h"
 
 #include "itkImageMaskSpatialObject.h"
+//#include "itkLabelMap.h"
+#include "itkStatisticsLabelObject.h"
+#include "itkLabelImageToStatisticsLabelMapFilter.h"
 
 //  The following section of code implements a Command observer
 //  used to monitor the evolution of the registration process.
@@ -276,7 +280,108 @@ int main( int argc, char *argv[] )
   metric->SetFixedImageMask(  fixedMask   );
   metric->SetMovingImageMask(   movingMask   );
 
+  // Calculate the initial transform by first aligning the centers of the masks,
+  // and then doing sparse search
+  typename MovingImageType::PointType movingCenter;
+  typename FixedImageType::PointType fixedCenter;
 
+  // calculate the centers of each ROI
+  typedef itk::StatisticsLabelObject< unsigned char, 3 > LabelObjectType;
+  typedef itk::LabelMap< LabelObjectType >               LabelMapType;
+  typedef itk::LabelImageToStatisticsLabelMapFilter< MaskImageType, MaskImageType >
+  LabelStatisticsFilterType;
+  typedef LabelMapType::LabelObjectContainerType LabelObjectContainerType;
+
+  LabelStatisticsFilterType::Pointer movingImageToLabel = LabelStatisticsFilterType::New();
+  movingImageToLabel->SetInput( movingImageMask );
+  movingImageToLabel->SetFeatureImage(movingImageMask );
+  movingImageToLabel->SetComputePerimeter(false);
+  movingImageToLabel->Update();
+
+  LabelStatisticsFilterType::Pointer fixedImageToLabel = LabelStatisticsFilterType::New();
+  fixedImageToLabel->SetInput( fixedImageMask );
+  fixedImageToLabel->SetFeatureImage( fixedImageMask );
+  fixedImageToLabel->SetComputePerimeter(false);
+  fixedImageToLabel->Update();
+
+  LabelObjectType *movingLabel = movingImageToLabel->GetOutput()->GetNthLabelObject(0);
+  LabelObjectType *fixedLabel = fixedImageToLabel->GetOutput()->GetNthLabelObject(0);
+
+  LabelObjectType::CentroidType movingCentroid = movingLabel->GetCentroid();
+  LabelObjectType::CentroidType fixedCentroid = fixedLabel->GetCentroid();
+
+  movingCenter[0] = movingCentroid[0];
+  movingCenter[1] = movingCentroid[1];
+  movingCenter[2] = movingCentroid[2];
+
+  fixedCenter[0] = fixedCentroid[0];
+  fixedCenter[1] = fixedCentroid[1];
+  fixedCenter[2] = fixedCentroid[2];
+
+  // do the search
+  RigidTransformType::InputPointType rotationCenter;
+  RigidTransformType::OutputVectorType translationVector;
+  itk::Vector< double, 3 > scaleValue;
+
+  for ( unsigned int i = 0; i < 3; i++ )
+    {
+    rotationCenter[i]    = fixedCenter[i];
+    translationVector[i] = movingCenter[i] - fixedCenter[i];
+    scaleValue[i] = 1;
+    }
+  typedef itk::Euler3DTransform< double > EulerAngle3DTransformType;
+  EulerAngle3DTransformType::Pointer bestEulerAngles3D = EulerAngle3DTransformType::New();
+  bestEulerAngles3D->SetCenter(rotationCenter);
+  bestEulerAngles3D->SetTranslation(translationVector);
+
+  typedef itk::Euler3DTransform< double > EulerAngle3DTransformType;
+  EulerAngle3DTransformType::Pointer currentEulerAngles3D = EulerAngle3DTransformType::New();
+  currentEulerAngles3D->SetCenter(rotationCenter);
+  currentEulerAngles3D->SetTranslation(translationVector);
+
+  metric->SetTransform(currentEulerAngles3D);
+  metric->Initialize();
+  double max_cc = 0.0;
+  // void QuickSampleParameterSpace(void)
+    {
+    currentEulerAngles3D->SetRotation(0, 0, 0);
+    // Initialize with current guess;
+    max_cc = metric->GetValue( currentEulerAngles3D->GetParameters() );
+    const double HARange = 12.0;
+    const double PARange = 12.0;
+    // rough search in neighborhood.
+    const double one_degree = 1.0F * vnl_math::pi / 180.0F;
+    const double HAStepSize = 3.0 * one_degree;
+    const double PAStepSize = 3.0 * one_degree;
+    // Quick search just needs to get an approximate angle correct.
+      {
+      for ( double HA = -HARange * one_degree; HA <= HARange * one_degree; HA += HAStepSize )
+        {
+        for ( double PA = -PARange * one_degree; PA <= PARange * one_degree; PA += PAStepSize )
+          {
+          currentEulerAngles3D->SetRotation(PA, 0, HA);
+          const double current_cc = metric->GetValue( currentEulerAngles3D->GetParameters() );
+          if ( current_cc < max_cc )
+            {
+            max_cc = current_cc;
+            bestEulerAngles3D->SetFixedParameters( currentEulerAngles3D->GetFixedParameters() );
+            bestEulerAngles3D->SetParameters( currentEulerAngles3D->GetParameters() );
+            }
+          // #define DEBUGGING_PRINT_IMAGES
+
+          }
+        }
+      }
+    }
+
+  RigidTransformType::Pointer quickSetVersor = RigidTransformType::New();
+  quickSetVersor->SetCenter( bestEulerAngles3D->GetCenter() );
+  quickSetVersor->SetTranslation( bestEulerAngles3D->GetTranslation() );
+  {
+    itk::Versor< double > localRotation;
+    localRotation.Set( bestEulerAngles3D->GetRotationMatrix() );
+    quickSetVersor->SetRotation(localRotation);
+  }
   //
   // Add a time and memory probes collector for profiling the computation time
   // of every stage.
@@ -304,7 +409,7 @@ int main( int argc, char *argv[] )
 
   RigidTransformType::Pointer  rigidTransform = RigidTransformType::New();
 
-  initializer->SetTransform(   rigidTransform );
+  initializer->SetTransform(   quickSetVersor );
   initializer->SetFixedImage(  fixedImageReader->GetOutput() );
   initializer->SetMovingImage( movingImageReader->GetOutput() );
   initializer->MomentsOn();
