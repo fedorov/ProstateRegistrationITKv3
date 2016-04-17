@@ -1,19 +1,7 @@
 FROM thewtex/centos-build:v1.0.0
 MAINTAINER SlicerProstate http://github.com/SlicerProstate
 
-RUN yum update -y && \
-  yum install -y \
-    fontconfig-devel \
-    libX11-devel \
-    libXt-devel \
-    libXext-devel \
-    libXrender-devel \
-    libGLU-devel \
-    mesa-libOSMesa-devel \
-    mesa-libGL-devel \
-    mesa-libGLU-devel \
-    ncurses \
-    vim
+RUN yum update -y 
 
 WORKDIR /usr/src
 
