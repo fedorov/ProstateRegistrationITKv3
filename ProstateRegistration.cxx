@@ -87,6 +87,7 @@
 
 
 #include "itkTransformFileReader.h"
+#include "itkTransformFileWriter.h"
 
 #include "itkImageMaskSpatialObject.h"
 //#include "itkLabelMap.h"
@@ -131,11 +132,11 @@ public:
 
 int main( int argc, char *argv[] )
 {
-  if( argc < 6 )
+  if( argc < 5 )
     {
     std::cerr << "Missing Parameters " << std::endl;
     std::cerr << "Usage: " << argv[0];
-    std::cerr << " fixedImageFile  movingImageFile outputImagefile  ";
+    std::cerr << " fixedImageFile  movingImageFile ";
     std::cerr << " fixedImageMaskFile movingImageMaskFile ";
     std::cerr << " [differenceOutputfile] [differenceBeforeRegistration] ";
     std::cerr << " [deformationField] ";
@@ -150,9 +151,9 @@ int main( int argc, char *argv[] )
 
   char *fixedImageFile = argv[1],
     *movingImageFile = argv[2],
-    *outputImageFile = argv[3],
-    *fixedImageMaskFile = argv[4],
-    *movingImageMaskFile = argv[5];
+    *outputImageFile = argv[100],
+    *fixedImageMaskFile = argv[3],
+    *movingImageMaskFile = argv[4];
 
   const    unsigned int    ImageDimension = 3;
   typedef  signed short    PixelType;
@@ -273,12 +274,22 @@ int main( int argc, char *argv[] )
   movingMask->SetImage(movingImageMask);
   movingMask->ComputeObjectToWorldTransform();
 
-  registration->SetFixedImage(  fixedImage   );
-  registration->SetMovingImage(   movingImageReader->GetOutput()   );
+  //registration->SetFixedImage(  fixedImage   );
+  //registration->SetMovingImage(   movingImageReader->GetOutput()   );
 
+  // BRAINSFitHelper.cxx:116
+  metric->SetFixedImage(  fixedImage  );
+  metric->SetMovingImage(   movingImage   );
 
   metric->SetFixedImageMask(  fixedMask   );
   metric->SetMovingImageMask(   movingMask   );
+
+  metric->SetFixedImageRegion( fixedImage->GetLargestPossibleRegion());
+  metric->ReinitializeSeed(76926294);
+  metric->SetNumberOfSpatialSamples(10000);
+  metric->SetNumberOfHistogramBins( 50 );
+  metric->SetUseCachingOfBSplineWeights(1);
+  metric->SetUseExplicitPDFDerivatives(1);
 
   // Calculate the initial transform by first aligning the centers of the masks,
   // and then doing sparse search
@@ -339,6 +350,13 @@ int main( int argc, char *argv[] )
   currentEulerAngles3D->SetCenter(rotationCenter);
   currentEulerAngles3D->SetTranslation(translationVector);
 
+  /*
+  itk::TransformFileWriter::Pointer tw = itk::TransformFileWriter::New();
+  tw->SetInput(currentEulerAngles3D);
+  tw->SetFileName("/tmp/e.tfm");
+  tw->Update();
+  */
+
   metric->SetTransform(currentEulerAngles3D);
   metric->Initialize();
   double max_cc = 0.0;
@@ -382,48 +400,26 @@ int main( int argc, char *argv[] )
     localRotation.Set( bestEulerAngles3D->GetRotationMatrix() );
     quickSetVersor->SetRotation(localRotation);
   }
+
+  /*
+  itk::TransformFileWriter::Pointer tw = itk::TransformFileWriter::New();
+  tw->SetInput(quickSetVersor);
+  tw->SetFileName("/tmp/e.tfm");
+  tw->Update();
+  */
+
   //
   // Add a time and memory probes collector for profiling the computation time
   // of every stage.
   //
-  itkProbesCreate();
+  //itkProbesCreate();
 
+  registration->SetFixedImageRegion( fixedImage->GetLargestPossibleRegion() );
+  registration->SetInitialTransformParameters( quickSetVersor->GetParameters() );
+  registration->SetFixedImage(fixedImage);
+  registration->SetMovingImage(movingImage);
 
-  //
-  // Setup the metric parameters
-  //
-  metric->SetNumberOfHistogramBins( 50 );
-
-  FixedImageType::RegionType fixedRegion = fixedImage->GetBufferedRegion();
-
-  const unsigned int numberOfPixels = fixedRegion.GetNumberOfPixels();
-
-  metric->ReinitializeSeed( 76926294 );
-
-  // Initialize with the sparse search
-
-  //
-  //  Initialize a rigid transform by using Image Intensity Moments
-  //
-  TransformInitializerType::Pointer initializer = TransformInitializerType::New();
-
-  RigidTransformType::Pointer  rigidTransform = RigidTransformType::New();
-
-  initializer->SetTransform(   quickSetVersor );
-  initializer->SetFixedImage(  fixedImageReader->GetOutput() );
-  initializer->SetMovingImage( movingImageReader->GetOutput() );
-  initializer->MomentsOn();
-
-
-  std::cout << "Starting Rigid Transform Initialization " << std::endl;
-  itkProbesStart( "Rigid Initialization");
-  initializer->InitializeTransform();
-  itkProbesStop( "Rigid Initialization");
-  std::cout << "Rigid Transform Initialization completed" << std::endl;
-  std::cout << std::endl;
-
-  registration->SetFixedImageRegion( fixedRegion );
-  registration->SetInitialTransformParameters( rigidTransform->GetParameters() );
+  RigidTransformType::Pointer rigidTransform = RigidTransformType::New();
 
   registration->SetTransform( rigidTransform );
 
@@ -434,6 +430,8 @@ int main( int argc, char *argv[] )
   typedef OptimizerType::ScalesType       OptimizerScalesType;
   OptimizerScalesType optimizerScales( rigidTransform->GetNumberOfParameters() );
   const double translationScale = 1.0 / 1000.0;
+  const double reproportionScale = 1.0 / 1.0;
+  const double skewScale = 1.0 / 1.0;
 
   optimizerScales[0] = 1.0;
   optimizerScales[1] = 1.0;
@@ -444,10 +442,11 @@ int main( int argc, char *argv[] )
 
   optimizer->SetScales( optimizerScales );
 
+  // BRAINSFitHelperTemplate.cxx:521
   optimizer->SetMaximumStepLength( 0.2000  );
-  optimizer->SetMinimumStepLength( 0.0001 );
+  optimizer->SetMinimumStepLength( 0.005 );
 
-  optimizer->SetNumberOfIterations( 200 );
+  optimizer->SetNumberOfIterations( 1500 );
 
   //
   // The rigid transform has 6 parameters we use therefore a few samples to run
@@ -456,7 +455,7 @@ int main( int argc, char *argv[] )
   // Regulating the number of samples in the Metric is equivalent to performing
   // multi-resolution registration because it is indeed a sub-sampling of the
   // image.
-  metric->SetNumberOfSpatialSamples( 10000L );
+  metric->SetNumberOfSpatialSamples( 500000 );
 
   //
   // Create the Command observer and register it with the optimizer.
@@ -469,9 +468,9 @@ int main( int argc, char *argv[] )
 
   try
     {
-    itkProbesStart( "Rigid Registration" );
+    //itkProbesStart( "Rigid Registration" );
     registration->StartRegistration();
-    itkProbesStop( "Rigid Registration" );
+    //itkProbesStop( "Rigid Registration" );
     std::cout << "Optimizer stop condition = "
               << registration->GetOptimizer()->GetStopConditionDescription()
               << std::endl;
@@ -487,7 +486,6 @@ int main( int argc, char *argv[] )
   std::cout << std::endl;
 
   rigidTransform->SetParameters( registration->GetLastTransformParameters() );
-
 
   //
   //  Perform Affine Registration
@@ -519,10 +517,10 @@ int main( int argc, char *argv[] )
 
   optimizer->SetScales( optimizerScales );
 
-  optimizer->SetMaximumStepLength( 0.2000  );
-  optimizer->SetMinimumStepLength( 0.0001 );
+  //optimizer->SetMaximumStepLength( 0.2000  );
+  //optimizer->SetMinimumStepLength( 0.0001 );
 
-  optimizer->SetNumberOfIterations( 200 );
+  //optimizer->SetNumberOfIterations( 200 );
 
   //
   // The Affine transform has 12 parameters we use therefore a more samples to run
@@ -531,16 +529,16 @@ int main( int argc, char *argv[] )
   // Regulating the number of samples in the Metric is equivalent to performing
   // multi-resolution registration because it is indeed a sub-sampling of the
   // image.
-  metric->SetNumberOfSpatialSamples( 50000L );
+  //metric->SetNumberOfSpatialSamples( 500000L );
 
 
   std::cout << "Starting Affine Registration " << std::endl;
 
   try
     {
-    itkProbesStart( "Affine Registration" );
+    //itkProbesStart( "Affine Registration" );
     registration->StartRegistration();
-    itkProbesStop( "Affine Registration" );
+    //itkProbesStop( "Affine Registration" );
     }
   catch( itk::ExceptionObject & err )
     {
@@ -554,7 +552,9 @@ int main( int argc, char *argv[] )
 
   affineTransform->SetParameters( registration->GetLastTransformParameters() );
 
-
+  return 0;
+}
+#if 0
   //
   //  Perform Deformable Registration
   //
@@ -1049,3 +1049,4 @@ int main( int argc, char *argv[] )
 #undef itkProbesStart
 #undef itkProbesStop
 #undef itkProbesReport
+#endif // 0
